@@ -489,7 +489,7 @@ export default function WalletPage() {
         <CardHeader>
           <CardTitle className="flex items-center justify-between">
             Transaction History
-            <Button variant="ghost" size="icon" onClick={loadData} disabled={loading}>
+            <Button variant="ghost" size="icon" onClick={() => loadData()} disabled={loading}>
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             </Button>
           </CardTitle>
