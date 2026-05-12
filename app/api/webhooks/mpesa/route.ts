@@ -1,98 +1,35 @@
 /**
  * POST /api/webhooks/mpesa
- * Safaricom calls this endpoint after STK Push is completed (success or failure).
- * Updates the TransactionAlert and auto-processes the deposit.
+ * 
+ * ⚠️ LEGACY ENDPOINT — kept for backward compatibility.
+ * 
+ * The canonical callback URL is now /api/callbacks/mpesa.
+ * This route forwards any requests to the new handler so that
+ * existing Daraja portal configurations continue to work.
  */
 
-import { prisma } from "@/lib/prisma";
 import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    console.log("[M-Pesa Webhook] Received:", JSON.stringify(body, null, 2));
+    console.log("[M-Pesa Webhook Legacy] Forwarding to /api/callbacks/mpesa");
 
-    const stkCallback = body?.Body?.stkCallback;
-
-    if (!stkCallback) {
-      return new NextResponse("Invalid payload", { status: 400 });
-    }
-
-    const {
-      MerchantRequestID,
-      CheckoutRequestID,
-      ResultCode,
-      ResultDesc,
-      CallbackMetadata,
-    } = stkCallback;
-
-    // Extract metadata items (only present on success ResultCode === 0)
-    const items: any[] = CallbackMetadata?.Item || [];
-    const getItem = (name: string) => items.find((i) => i.Name === name)?.Value;
-
-    const amount = getItem("Amount");
-    const receipt = getItem("MpesaReceiptNumber"); // e.g. "QGH7XYZ123"
-    const phoneRaw = getItem("PhoneNumber");
-
-    console.log("[M-Pesa Webhook] CheckoutRequestID:", CheckoutRequestID, "ResultCode:", ResultCode);
-
-    // Find existing TransactionAlert created at STK push time
-    const existingAlert = await prisma.transactionAlert.findUnique({
-      where: { checkoutRequestId: CheckoutRequestID },
+    // Forward to the new global callback handler
+    const baseUrl = process.env.MPESA_CALLBACK_URL || 
+      (process.env.NEXTAUTH_URL || "http://localhost:3000");
+    
+    const response = await fetch(`${baseUrl}/api/callbacks/mpesa`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     });
 
-    if (ResultCode === 0) {
-      // ── Success ──────────────────────────────────────────────────────────────
-      if (existingAlert) {
-        // Update the existing alert with the receipt and mark it for processing
-        await prisma.transactionAlert.update({
-          where: { checkoutRequestId: CheckoutRequestID },
-          data: {
-            externalId: receipt || undefined,
-            amount: amount || existingAlert.amount,
-            payload: body,
-            status: "PENDING", // Will be set to PROCESSED by processTransactionAlert
-          },
-        });
-
-        // Auto-process: match user and create transaction
-        const { processTransactionAlertByCheckout } = await import("@/lib/transactions");
-        await processTransactionAlertByCheckout(CheckoutRequestID);
-      } else {
-        // Fallback: create a new alert if we somehow missed the STK push record
-        const alert = await prisma.transactionAlert.create({
-          data: {
-            externalId: receipt,
-            checkoutRequestId: CheckoutRequestID,
-            provider: "MPESA",
-            amount: amount || 0,
-            payload: body,
-            status: "PENDING",
-          },
-        });
-
-        const { processTransactionAlertByCheckout } = await import("@/lib/transactions");
-        await processTransactionAlertByCheckout(alert.checkoutRequestId!);
-      }
-    } else {
-      // ── Failed / Cancelled ───────────────────────────────────────────────────
-      if (existingAlert) {
-        await prisma.transactionAlert.update({
-          where: { checkoutRequestId: CheckoutRequestID },
-          data: {
-            payload: body,
-            status: "FAILED",
-          },
-        });
-      }
-      console.log(`[M-Pesa Webhook] Payment failed. Code: ${ResultCode} — ${ResultDesc}`);
-    }
-
-    // Always respond 200 to Safaricom to acknowledge receipt
-    return NextResponse.json({ ResultCode: 0, ResultDesc: "Success" });
+    const data = await response.json();
+    return NextResponse.json(data);
   } catch (error) {
-    console.error("[M-Pesa Webhook] Error:", error);
-    // Still return 200 so Safaricom doesn't retry indefinitely
+    console.error("[M-Pesa Webhook Legacy] Error forwarding:", error);
+    // Still return 200 so Safaricom doesn't retry
     return NextResponse.json({ ResultCode: 0, ResultDesc: "Acknowledged" });
   }
 }

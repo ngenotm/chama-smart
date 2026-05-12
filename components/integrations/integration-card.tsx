@@ -102,7 +102,7 @@ export function IntegrationCard({ title, description, type, icon }: IntegrationC
               </DialogTitle>
               <DialogDescription>
                 {type === "MPESA"
-                  ? "Enter your Safaricom Daraja API credentials and payment receiving details."
+                  ? "Enter your Lipa Na Mpesa Paybill/Till number and Passkey. API authentication is handled securely by the platform."
                   : `Provide your API credentials and settings for ${title}.`}
               </DialogDescription>
             </DialogHeader>

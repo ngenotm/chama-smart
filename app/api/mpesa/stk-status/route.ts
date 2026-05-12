@@ -2,15 +2,14 @@
  * POST /api/mpesa/stk-status
  * Polls the status of a pending STK Push by checkoutRequestId.
  * Frontend calls this every 3s after initiating a push.
- * Works both via Daraja query API AND by checking our TransactionAlert record
- * (which is updated by the webhook on callback), making it robust in dev
- * (no public callback URL needed) and production alike.
+ * 
+ * Uses MASTER token for Daraja query, Chama's Paybill + Passkey for the payload.
  */
 
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { queryStkStatus, getMpesaIntegrationConfig } from "@/lib/mpesa";
+import { queryStkStatus, getChamaMpesaConfig } from "@/lib/mpesa";
 
 export async function POST(req: Request) {
   try {
@@ -25,7 +24,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "checkoutRequestId is required" }, { status: 400 });
     }
 
-    // ── 1. Check our DB first (fastest path; updated by webhook on real callback) ──
+    // ── 1. Check our DB first (fastest path; updated by callback) ──
     const alert = await prisma.transactionAlert.findUnique({
       where: { checkoutRequestId },
     });
@@ -61,23 +60,23 @@ export async function POST(req: Request) {
       return NextResponse.json({ status: "PENDING" }); // fallback
     }
 
-    const mpesaData = await getMpesaIntegrationConfig(user.chamaId);
-    if (!mpesaData) {
-      // No config — just report pending (webhook will update DB when it arrives)
+    const chamaConfig = await getChamaMpesaConfig(user.chamaId);
+    if (!chamaConfig) {
+      // No config — just report pending (callback will update DB when it arrives)
       return NextResponse.json({ status: "PENDING" });
     }
 
-    const queryResult = await queryStkStatus(checkoutRequestId, mpesaData.config);
+    const queryResult = await queryStkStatus(checkoutRequestId, chamaConfig);
 
     if (queryResult.status === "SUCCESS") {
-      // Webhook should handle DB update when Safaricom calls back,
+      // Callback should handle DB update when Safaricom calls back,
       // but mark PROCESSED here as a safety net in case callback is delayed.
       await prisma.transactionAlert.update({
         where: { checkoutRequestId },
         data: { status: "PROCESSED" },
       });
 
-      // Auto-record the transaction immediately (don't wait for webhook)
+      // Auto-record the transaction immediately (don't wait for callback)
       try {
         const { processTransactionAlertByCheckout } = await import("@/lib/transactions");
         await processTransactionAlertByCheckout(checkoutRequestId);

@@ -1,13 +1,18 @@
 /**
  * POST /api/mpesa/stk-push
  * Initiates a Safaricom M-Pesa STK Push for the authenticated member.
- * Returns checkoutRequestId for frontend polling.
+ * 
+ * ── Multi-Tenant Flow ──
+ * 1. Fetches the Chama's Paybill + Passkey from DB (decrypted at runtime)
+ * 2. Gets OAuth token using MASTER credentials (env vars)
+ * 3. Sends STK Push with Chama's Paybill + Passkey, authorized by Master Token
+ * 4. Returns checkoutRequestId for frontend polling
  */
 
 import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { initiateStkPush, normalisePhone, getMpesaIntegrationConfig } from "@/lib/mpesa";
+import { initiateStkPush, normalisePhone, validatePhone, getChamaMpesaConfig } from "@/lib/mpesa";
 
 export async function POST(req: Request) {
   try {
@@ -26,6 +31,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "Phone number is required." }, { status: 400 });
     }
 
+    // Server-side phone validation: must be 2547XXXXXXXX
+    const normalised = normalisePhone(phone);
+    const phoneCheck = validatePhone(normalised);
+    if (!phoneCheck.valid) {
+      return NextResponse.json({ error: phoneCheck.error }, { status: 400 });
+    }
+
     // Get the user's chama
     const user = await prisma.user.findUnique({
       where: { id: session.user.id },
@@ -36,9 +48,9 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "User has no chama context." }, { status: 400 });
     }
 
-    // Load the chama's M-Pesa configuration
-    const mpesaData = await getMpesaIntegrationConfig(user.chamaId);
-    if (!mpesaData) {
+    // Load the chama's M-Pesa configuration (Paybill + decrypted Passkey)
+    const chamaConfig = await getChamaMpesaConfig(user.chamaId);
+    if (!chamaConfig) {
       return NextResponse.json(
         {
           error:
@@ -50,11 +62,11 @@ export async function POST(req: Request) {
 
     const callbackUrl =
       (process.env.MPESA_CALLBACK_URL || "https://your-domain.com") +
-      "/api/webhooks/mpesa";
+      "/api/callbacks/mpesa";
 
     const result = await initiateStkPush({
-      config: mpesaData.config,
-      phone: normalisePhone(phone),
+      chamaConfig,
+      phone: normalised,
       amount: Number(amount),
       description: description || "Chama Contribution",
       callbackUrl,

@@ -8,22 +8,31 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { Loader2, Copy, CheckCircle, Eye, EyeOff } from "lucide-react";
+import { Loader2, Copy, CheckCircle, Eye, EyeOff, ShieldCheck, Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 
+/**
+ * Multi-Tenant M-Pesa Config Form
+ *
+ * Chama Admins only provide:
+ *  - Lipa Na Mpesa Paybill/Till Number (BusinessShortCode)
+ *  - Lipa Na Mpesa Passkey
+ *  - Account Number prefix (optional, for Paybill)
+ *  - Transaction Type (Paybill vs Buy Goods)
+ *
+ * Consumer Key/Secret are managed by the Platform Owner
+ * and stored in server-side environment variables.
+ */
+
 const mpesaSchema = z.object({
-  shortCode: z.string().min(1, "Shortcode / Paybill / Till is required"),
+  shortCode: z.string().min(1, "Paybill or Till number is required"),
   passkey: z.string().min(1, "LNM Passkey is required"),
-  consumerKey: z.string().min(1, "Consumer Key is required"),
-  consumerSecret: z.string().min(1, "Consumer Secret is required"),
   accountReference: z.string().optional(),
   transactionType: z.enum(["CustomerPayBillOnline", "CustomerBuyGoodsOnline"]),
-  environment: z.enum(["sandbox", "production"]),
 });
 
 type MpesaFormValues = z.infer<typeof mpesaSchema>;
-
 
 interface MpesaConfigFormProps {
   onSaved?: () => void;
@@ -32,15 +41,13 @@ interface MpesaConfigFormProps {
 export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
   const [loading, setLoading] = useState(false);
   const [fetching, setFetching] = useState(true);
-  const [integrationId, setIntegrationId] = useState<string | null>(null);
+  const [isConfigured, setIsConfigured] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showPasskey, setShowPasskey] = useState(false);
-  const [showConsumerKey, setShowConsumerKey] = useState(false);
-  const [showConsumerSecret, setShowConsumerSecret] = useState(false);
 
   const callbackUrl =
     (typeof window !== "undefined" ? window.location.origin : "https://your-domain.com") +
-    "/api/webhooks/mpesa";
+    "/api/callbacks/mpesa";
 
   const { register, handleSubmit, reset, watch, formState: { errors } } =
     useForm<MpesaFormValues>({
@@ -48,17 +55,14 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
       defaultValues: {
         shortCode: "",
         passkey: "",
-        consumerKey: "",
-        consumerSecret: "",
         accountReference: "",
         transactionType: "CustomerPayBillOnline",
-        environment: "sandbox",
       },
     });
 
   const transactionType = watch("transactionType");
 
-  // Load existing integration config
+  // Load existing M-Pesa config
   useEffect(() => {
     const load = async () => {
       setFetching(true);
@@ -67,21 +71,18 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
         if (res.ok) {
           const data = await res.json();
           const mpesa = data.find((i: any) => i.type === "MPESA");
-          if (mpesa) {
-            setIntegrationId(mpesa.id);
+          if (mpesa?.isEnabled && mpesa?.config) {
+            setIsConfigured(true);
             reset({
-              shortCode: mpesa.config?.shortCode || "",
-              passkey: mpesa.config?.passkey || "",
-              consumerKey: mpesa.config?.consumerKey || "",
-              consumerSecret: mpesa.config?.consumerSecret || "",
-              accountReference: mpesa.config?.accountReference || "",
-              transactionType: mpesa.config?.transactionType || "CustomerPayBillOnline",
-              environment: mpesa.config?.environment || "sandbox",
+              shortCode: mpesa.config.shortCode || "",
+              passkey: mpesa.config.passkey || "",
+              accountReference: mpesa.config.accountReference || "",
+              transactionType: mpesa.config.transactionType || "CustomerPayBillOnline",
             });
           }
         }
       } catch (e) {
-        console.error("Failed to load integration config", e);
+        console.error("Failed to load M-Pesa config", e);
       } finally {
         setFetching(false);
       }
@@ -96,7 +97,6 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          id: integrationId || undefined,
           type: "MPESA",
           config: values,
           name: "M-Pesa (Daraja)",
@@ -105,12 +105,12 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
       });
 
       if (response.ok) {
-        const saved = await response.json();
-        setIntegrationId(saved.id);
-        toast.success("M-Pesa credentials saved successfully! 🎉");
+        setIsConfigured(true);
+        toast.success("M-Pesa payment settings saved! 🎉");
         onSaved?.();
       } else {
-        toast.error("Failed to save M-Pesa credentials.");
+        const data = await response.json().catch(() => ({}));
+        toast.error(data.error || "Failed to save M-Pesa settings.");
       }
     } catch {
       toast.error("An error occurred while saving.");
@@ -136,32 +136,20 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
 
   return (
     <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
-      {/* Environment */}
-      <div className="space-y-2">
-        <Label>Environment</Label>
-        <div className="flex gap-3">
-          {(["sandbox", "production"] as const).map((env) => (
-            <label
-              key={env}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg border cursor-pointer text-sm font-medium transition-colors ${
-                watch("environment") === env
-                  ? "border-green-500 bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-300"
-                  : "border-muted text-muted-foreground hover:border-foreground/30"
-              }`}
-            >
-              <input type="radio" value={env} {...register("environment")} className="sr-only" />
-              {env === "sandbox" ? "🧪 Sandbox" : "🚀 Production"}
-            </label>
-          ))}
-        </div>
-        {watch("environment") === "sandbox" && (
-          <p className="text-xs text-amber-600 dark:text-amber-400">
-            Sandbox mode — payments are simulated. Switch to Production when ready to go live.
+      {/* Platform-managed credentials notice */}
+      <div className="rounded-xl bg-blue-50 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-800 p-4 flex gap-3 items-start">
+        <ShieldCheck className="h-5 w-5 text-blue-600 shrink-0 mt-0.5" />
+        <div>
+          <p className="text-sm font-semibold text-blue-800 dark:text-blue-300">
+            Secure Platform Integration
           </p>
-        )}
+          <p className="text-xs text-blue-700 dark:text-blue-400 mt-0.5 leading-relaxed">
+            API authentication (Consumer Key & Secret) is managed securely by the ChamaSmart platform.
+            You only need to provide your <strong>Paybill/Till</strong> number and <strong>Passkey</strong> below.
+            Your passkey is encrypted before being stored.
+          </p>
+        </div>
       </div>
-
-      <Separator />
 
       {/* Transaction Type */}
       <div className="space-y-2">
@@ -186,10 +174,10 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
         </div>
       </div>
 
-      {/* Shortcode */}
+      {/* Shortcode (Paybill / Till) */}
       <div className="space-y-2">
         <Label htmlFor="shortCode">
-          {transactionType === "CustomerPayBillOnline" ? "Paybill Number" : "Till Number"}
+          {transactionType === "CustomerPayBillOnline" ? "Lipa Na Mpesa Paybill Number" : "Till Number"}
         </Label>
         <Input
           id="shortCode"
@@ -197,6 +185,9 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
           placeholder={transactionType === "CustomerPayBillOnline" ? "e.g. 522522" : "e.g. 123456"}
         />
         {errors.shortCode && <p className="text-xs text-red-500">{errors.shortCode.message}</p>}
+        <p className="text-xs text-muted-foreground">
+          This is your M-Pesa receiving number (BusinessShortCode) provided by Safaricom.
+        </p>
       </div>
 
       {/* Account Reference (Paybill only) */}
@@ -209,72 +200,22 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
             placeholder="e.g. 0123456789 (your chama's bank account number)"
           />
           <p className="text-xs text-muted-foreground">
-            This is the account number at your bank (shown on member's M-Pesa receipt).
+            This appears on the member's M-Pesa receipt as the account number.
           </p>
         </div>
       )}
 
       <Separator />
 
-      {/* Daraja API Credentials */}
-      <p className="text-sm font-semibold text-foreground">Daraja API Credentials</p>
-      <p className="text-xs text-muted-foreground -mt-3">
-        Get these from{" "}
-        <a href="https://developer.safaricom.co.ke" target="_blank" rel="noreferrer" className="text-blue-500 underline">
-          developer.safaricom.co.ke
-        </a>
-      </p>
-
+      {/* LNM Passkey */}
       <div className="space-y-2">
-        <Label htmlFor="consumerKey">Consumer Key</Label>
-        <div className="relative">
-          <Input
-            id="consumerKey"
-            type={showConsumerKey ? "text" : "password"}
-            {...register("consumerKey")}
-            className="pr-10"
-          />
-          <button
-            type="button"
-            onClick={() => setShowConsumerKey((v) => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          >
-            {showConsumerKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </div>
-        {errors.consumerKey && <p className="text-xs text-red-500">{errors.consumerKey.message}</p>}
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="consumerSecret">Consumer Secret</Label>
-        <div className="relative">
-          <Input
-            id="consumerSecret"
-            type={showConsumerSecret ? "text" : "password"}
-            {...register("consumerSecret")}
-            className="pr-10"
-          />
-          <button
-            type="button"
-            onClick={() => setShowConsumerSecret((v) => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-          >
-            {showConsumerSecret ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-          </button>
-        </div>
-        {errors.consumerSecret && (
-          <p className="text-xs text-red-500">{errors.consumerSecret.message}</p>
-        )}
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="passkey">LNM Passkey (Online Passkey)</Label>
+        <Label htmlFor="passkey">Lipa Na Mpesa Online Passkey</Label>
         <div className="relative">
           <Input
             id="passkey"
             type={showPasskey ? "text" : "password"}
             {...register("passkey")}
-            placeholder="Lipa Na M-Pesa Online Passkey from Daraja"
+            placeholder="Lipa Na M-Pesa Online Passkey from Safaricom"
             className="pr-10"
           />
           <button
@@ -286,13 +227,20 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
           </button>
         </div>
         {errors.passkey && <p className="text-xs text-red-500">{errors.passkey.message}</p>}
+        <p className="text-xs text-muted-foreground flex items-start gap-1.5">
+          <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+          <span>
+            Obtain this from your Safaricom Daraja portal or your bank relationship manager.
+            It's encrypted before being stored in our database.
+          </span>
+        </p>
       </div>
 
       <Separator />
 
       {/* Callback URL to paste in Daraja */}
       <div className="space-y-2">
-        <Label>Callback URL <Badge variant="secondary" className="ml-1 text-xs">Copy into Daraja portal</Badge></Label>
+        <Label>Callback URL <Badge variant="secondary" className="ml-1 text-xs">Auto-managed</Badge></Label>
         <div className="flex items-center gap-2">
           <Input
             readOnly
@@ -304,13 +252,13 @@ export function MpesaConfigForm({ onSaved }: MpesaConfigFormProps) {
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          Paste this URL in your Daraja app under "Callback URLs" → STK Push Callback.
+          This global callback URL is auto-configured. All M-Pesa payment results are routed here.
         </p>
       </div>
 
       <Button type="submit" className="w-full" disabled={loading}>
         {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-        {integrationId ? "Update M-Pesa Credentials" : "Save M-Pesa Credentials"}
+        {isConfigured ? "Update M-Pesa Settings" : "Save M-Pesa Settings"}
       </Button>
     </form>
   );

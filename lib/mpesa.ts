@@ -1,10 +1,17 @@
 /**
  * lib/mpesa.ts
  * Daraja API helpers for M-Pesa STK Push integration.
- * All credentials are loaded per-chama from the Integration DB record.
+ *
+ * ── Multi-Tenant "Master App" Architecture ──
+ * • OAuth token is generated using the PLATFORM OWNER's master credentials
+ *   (MPESA_MASTER_CONSUMER_KEY / MPESA_MASTER_CONSUMER_SECRET env vars).
+ * • Each Chama provides its own Paybill/Till + Passkey (stored encrypted in DB).
+ * • STK Push uses the Chama's Paybill + Passkey, authorized by the Master Token.
+ * • A single global callback URL handles all Chamas.
  */
 
 import { prisma } from "@/lib/prisma";
+import { decrypt } from "@/lib/encryption";
 
 const SANDBOX_BASE = "https://sandbox.safaricom.co.ke";
 const PRODUCTION_BASE = "https://api.safaricom.co.ke";
@@ -15,22 +22,18 @@ function getBaseUrl(): string {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-export interface MpesaConfig {
-  consumerKey: string;
-  consumerSecret: string;
-  shortCode: string;      // Paybill or Till number (receiving)
-  passkey: string;        // LNM Passkey from Daraja portal
-  accountReference?: string; // e.g. account number at bank
-  environment?: "sandbox" | "production";
-  // The shortcode type tells M-Pesa how to process:
-  // "CustomerPayBillOnline" for Paybill, "CustomerBuyGoodsOnline" for Till
+/** Per-Chama M-Pesa config (fetched from DB, passkey decrypted at runtime) */
+export interface ChamaMpesaConfig {
+  shortCode: string;        // Paybill or Till number (BusinessShortCode)
+  passkey: string;          // Decrypted LNM Passkey
+  accountReference?: string;
   transactionType?: "CustomerPayBillOnline" | "CustomerBuyGoodsOnline";
 }
 
 export interface StkPushParams {
-  config: MpesaConfig;
-  phone: string;          // Member's phone: 254712345678
-  amount: number;         // Amount in KES (whole number)
+  chamaConfig: ChamaMpesaConfig;
+  phone: string;            // Member's phone: 2547XXXXXXXX
+  amount: number;           // Amount in KES (whole number)
   description?: string;
   callbackUrl: string;
 }
@@ -51,17 +54,54 @@ export interface StkStatusResult {
   error?: string;
 }
 
-// ─── OAuth Token ──────────────────────────────────────────────────────────────
+// ─── Phone Validation ─────────────────────────────────────────────────────────
+
+/**
+ * Validate that a phone number matches the required 2547XXXXXXXX format.
+ */
+export function validatePhone(phone: string): { valid: boolean; error?: string } {
+  const cleaned = normalisePhone(phone);
+  if (!/^2547\d{8}$/.test(cleaned)) {
+    return {
+      valid: false,
+      error: "Phone number must be in the format 2547XXXXXXXX (e.g. 254712345678).",
+    };
+  }
+  return { valid: true };
+}
+
+/**
+ * Normalise phone to 254XXXXXXXXX format
+ */
+export function normalisePhone(phone: string): string {
+  const cleaned = phone.replace(/\D/g, "");
+  if (cleaned.startsWith("0")) return "254" + cleaned.slice(1);
+  if (cleaned.startsWith("254")) return cleaned;
+  if (cleaned.startsWith("+254")) return cleaned.slice(1);
+  return cleaned;
+}
+
+// ─── OAuth Token (Master Credentials) ─────────────────────────────────────────
 
 let tokenCache: { token: string; expiresAt: number } | null = null;
 
-export async function getMpesaToken(
-  consumerKey: string,
-  consumerSecret: string
-): Promise<string> {
+/**
+ * Get an OAuth token using the Platform Owner's master credentials.
+ * These NEVER leave the server — stored in MPESA_MASTER_CONSUMER_KEY / MPESA_MASTER_CONSUMER_SECRET.
+ */
+export async function getMasterToken(): Promise<string> {
   // Return cached token if still valid (with 60s buffer)
   if (tokenCache && Date.now() < tokenCache.expiresAt - 60_000) {
     return tokenCache.token;
+  }
+
+  const consumerKey = process.env.MPESA_MASTER_CONSUMER_KEY;
+  const consumerSecret = process.env.MPESA_MASTER_CONSUMER_SECRET;
+
+  if (!consumerKey || !consumerSecret) {
+    throw new Error(
+      "MPESA_MASTER_CONSUMER_KEY and MPESA_MASTER_CONSUMER_SECRET must be set in environment variables."
+    );
   }
 
   const credentials = Buffer.from(`${consumerKey}:${consumerSecret}`).toString("base64");
@@ -80,7 +120,7 @@ export async function getMpesaToken(
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Failed to get M-Pesa token: ${response.status} — ${text}`);
+    throw new Error(`Failed to get M-Pesa master token: ${response.status} — ${text}`);
   }
 
   const data = await response.json();
@@ -95,17 +135,6 @@ export async function getMpesaToken(
 }
 
 // ─── STK Push ─────────────────────────────────────────────────────────────────
-
-/**
- * Normalise phone to 254XXXXXXXXX format
- */
-export function normalisePhone(phone: string): string {
-  const cleaned = phone.replace(/\D/g, "");
-  if (cleaned.startsWith("0")) return "254" + cleaned.slice(1);
-  if (cleaned.startsWith("254")) return cleaned;
-  if (cleaned.startsWith("+254")) return cleaned.slice(1);
-  return cleaned;
-}
 
 /**
  * Generate the Lipa Na M-Pesa password (Base64 of shortcode + passkey + timestamp)
@@ -126,27 +155,32 @@ function getTimestamp(): string {
 
 /**
  * Initiate STK Push — sends a payment prompt to the member's phone.
+ * Uses the MASTER token for authorization, but the CHAMA's Paybill + Passkey for the payload.
  */
 export async function initiateStkPush(params: StkPushParams): Promise<StkPushResult> {
   try {
-    const { config, phone, amount, description, callbackUrl } = params;
-    const token = await getMpesaToken(config.consumerKey, config.consumerSecret);
+    const { chamaConfig, phone, amount, description, callbackUrl } = params;
+
+    // 1. Get master OAuth token
+    const token = await getMasterToken();
+
+    // 2. Build payload using the Chama's credentials
     const timestamp = getTimestamp();
-    const password = generatePassword(config.shortCode, config.passkey, timestamp);
+    const password = generatePassword(chamaConfig.shortCode, chamaConfig.passkey, timestamp);
     const normalised = normalisePhone(phone);
     const base = getBaseUrl();
 
-    const transactionType = config.transactionType || "CustomerPayBillOnline";
-    const accountRef = config.accountReference || config.shortCode;
+    const transactionType = chamaConfig.transactionType || "CustomerPayBillOnline";
+    const accountRef = chamaConfig.accountReference || chamaConfig.shortCode;
 
     const payload = {
-      BusinessShortCode: config.shortCode,
+      BusinessShortCode: chamaConfig.shortCode,
       Password: password,
       Timestamp: timestamp,
       TransactionType: transactionType,
       Amount: Math.ceil(amount), // M-Pesa requires whole numbers
       PartyA: normalised,         // Customer phone
-      PartyB: config.shortCode,   // Receiving shortcode
+      PartyB: chamaConfig.shortCode, // Receiving shortcode
       PhoneNumber: normalised,    // Phone to receive the STK prompt
       CallBackURL: callbackUrl,
       AccountReference: accountRef,
@@ -156,8 +190,9 @@ export async function initiateStkPush(params: StkPushParams): Promise<StkPushRes
     console.log("[MPesa STK Push] Initiating:", {
       phone: normalised,
       amount: Math.ceil(amount),
-      shortCode: config.shortCode,
+      shortCode: chamaConfig.shortCode,
       transactionType,
+      authMode: "MASTER_TOKEN",
     });
 
     const response = await fetch(`${base}/mpesa/stkpush/v1/processrequest`, {
@@ -196,20 +231,20 @@ export async function initiateStkPush(params: StkPushParams): Promise<StkPushRes
 
 /**
  * Query the status of a pending STK Push transaction.
- * Used for polling from the frontend (works even without callback URL in dev).
+ * Uses MASTER token for authorization, Chama's Paybill + Passkey for the payload.
  */
 export async function queryStkStatus(
   checkoutRequestId: string,
-  config: MpesaConfig
+  chamaConfig: ChamaMpesaConfig
 ): Promise<StkStatusResult> {
   try {
-    const token = await getMpesaToken(config.consumerKey, config.consumerSecret);
+    const token = await getMasterToken();
     const timestamp = getTimestamp();
-    const password = generatePassword(config.shortCode, config.passkey, timestamp);
+    const password = generatePassword(chamaConfig.shortCode, chamaConfig.passkey, timestamp);
     const base = getBaseUrl();
 
     const payload = {
-      BusinessShortCode: config.shortCode,
+      BusinessShortCode: chamaConfig.shortCode,
       Password: password,
       Timestamp: timestamp,
       CheckoutRequestID: checkoutRequestId,
@@ -252,28 +287,56 @@ export async function queryStkStatus(
 // ─── Config Loader ────────────────────────────────────────────────────────────
 
 /**
- * Fetch a chama's saved M-Pesa Integration config from DB.
+ * Fetch a Chama's M-Pesa config from the Chama model (not Integration table).
+ * Decrypts the passkey at runtime.
  */
-export async function getMpesaIntegrationConfig(
+export async function getChamaMpesaConfig(
   chamaId: string
-): Promise<{ config: MpesaConfig; integrationId: string } | null> {
+): Promise<ChamaMpesaConfig | null> {
   try {
-    const integration = await prisma.integration.findFirst({
-      where: { chamaId, type: "MPESA", isEnabled: true },
+    const chama = await prisma.chama.findUnique({
+      where: { id: chamaId },
+      select: {
+        mpesaPaybill: true,
+        mpesaPasskey: true,
+        mpesaAccountRef: true,
+        mpesaTransactionType: true,
+      },
     });
 
-    if (!integration) return null;
-
-    const config = integration.config as any;
-
-    // Validate minimum required fields
-    if (!config?.consumerKey || !config?.consumerSecret || !config?.shortCode || !config?.passkey) {
+    if (!chama?.mpesaPaybill || !chama?.mpesaPasskey) {
       return null;
     }
 
-    return { config: config as MpesaConfig, integrationId: integration.id };
+    // Decrypt the passkey
+    let decryptedPasskey: string;
+    try {
+      decryptedPasskey = decrypt(chama.mpesaPasskey);
+    } catch (err) {
+      console.error("[getChamaMpesaConfig] Failed to decrypt passkey:", err);
+      return null;
+    }
+
+    return {
+      shortCode: chama.mpesaPaybill,
+      passkey: decryptedPasskey,
+      accountReference: chama.mpesaAccountRef || undefined,
+      transactionType: (chama.mpesaTransactionType as ChamaMpesaConfig["transactionType"]) || undefined,
+    };
   } catch (error) {
-    console.error("[getMpesaConfig] Error:", error);
+    console.error("[getChamaMpesaConfig] Error:", error);
     return null;
   }
+}
+
+/**
+ * @deprecated Use getChamaMpesaConfig instead. Kept for backward compatibility.
+ * Legacy config loader that reads from Integration table — now redirects to Chama model.
+ */
+export async function getMpesaIntegrationConfig(
+  chamaId: string
+): Promise<{ config: ChamaMpesaConfig; integrationId: string } | null> {
+  const config = await getChamaMpesaConfig(chamaId);
+  if (!config) return null;
+  return { config, integrationId: "chama-model" };
 }

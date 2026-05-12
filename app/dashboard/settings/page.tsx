@@ -374,7 +374,7 @@ export default function SettingsPage() {
                         M-Pesa Payment Setup
                       </p>
                       <p className="text-xs text-green-700 dark:text-green-400 mt-0.5 leading-relaxed">
-                        Configure your Paybill/Till number and Daraja API credentials in the{" "}
+                        Set up your Paybill/Till number and Passkey in the{" "}
                         <button
                           type="button"
                           onClick={() => setActiveTab("integrations")}
@@ -382,7 +382,7 @@ export default function SettingsPage() {
                         >
                           Integrations tab
                         </button>
-                        . This ensures your payment details are securely stored and linked to the M-Pesa STK Push flow.
+                        . API authentication is handled securely by the ChamaSmart platform — you only need your receiving details.
                       </p>
                     </div>
                   </div>

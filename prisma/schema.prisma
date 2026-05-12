@@ -68,6 +68,14 @@ model Chama {
   email         String
   phone         String?
   logo          String?       // Base64 or URL for the group logo
+
+  // ── M-Pesa Multi-Tenant Fields ─────────────────────────────────────────────
+  // Chama Admin provides these; Consumer Key/Secret live in platform env vars.
+  mpesaPaybill        String?   // Lipa Na Mpesa Paybill/Till number (BusinessShortCode)
+  mpesaPasskey        String?   // Encrypted LNM Passkey (AES-256-GCM)
+  mpesaAccountRef     String?   // Account Number prefix (for Paybill)
+  mpesaTransactionType String?  // "CustomerPayBillOnline" | "CustomerBuyGoodsOnline"
+
   users         User[]
   assets        Asset[]
   integrations  Integration[]
