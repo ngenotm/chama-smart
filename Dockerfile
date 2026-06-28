@@ -1,15 +1,21 @@
 FROM node:20-bookworm-slim
 
-# Calibre's Qt WebEngine refuses to run as root without this.
-# Also suppress the XDG_RUNTIME_DIR warning.
+# Install Pandoc and Calibre
+RUN apt-get update && \
+    apt-get install -y pandoc calibre && \
+    rm -rf /var/lib/apt/lists/*
+
 ENV QTWEBENGINE_DISABLE_SANDBOX=1
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 
 WORKDIR /app
 
 COPY package*.json ./
-COPY prisma.config.ts ./
+
+# Prisma files - make config optional
 COPY prisma ./prisma/
+COPY prisma.config.ts ./ 2>/dev/null || true
+
 RUN npm install
 
 COPY . .
